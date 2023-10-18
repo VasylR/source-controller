@@ -511,6 +511,16 @@ func TestBucketReconciler_reconcileSource_generic(t *testing.T) {
 			},
 		},
 		{
+			name: "Configure git Client with TLS cert from secretRef",
+			bucketName: "dummy",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "dummy",
+				},
+			},
+			
+		},
+		{
 			name:       "Observes non-existing bucket name",
 			bucketName: "dummy",
 			beforeFunc: func(obj *bucketv1.Bucket) {

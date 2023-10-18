@@ -61,7 +61,9 @@ import (
 	"github.com/fluxcd/source-controller/internal/features"
 	sreconcile "github.com/fluxcd/source-controller/internal/reconcile"
 	"github.com/fluxcd/source-controller/internal/reconcile/summarize"
+	"github.com/fluxcd/source-controller/internal/tls"
 	"github.com/fluxcd/source-controller/internal/util"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
 )
 
 // gitRepositoryReadyCondition contains the information required to summarize a
@@ -143,6 +145,17 @@ type GitRepositoryReconcilerOptions struct {
 // gitRepositoryReconcileFunc is the function type for all the
 // v1beta2.GitRepository (sub)reconcile functions.
 type gitRepositoryReconcileFunc func(ctx context.Context, sp *patch.SerialPatcher, obj *sourcev1.GitRepository, commit *git.Commit, includes *artifactSet, dir string) (sreconcile.Result, error)
+
+// Interface co configure gitclient with custom TLS options
+// used for application firewall authentication.
+type GitClientConfigurer interface {
+	ConfigureGitClient(ctx context.Context, obj *sourcev1.GitRepository)
+}
+
+type GitClientHttpConfigurer struct {
+	SSLCertificateData map[string][]byte
+	ProxyOpts          *transport.ProxyOptions
+}
 
 func (r *GitRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return r.SetupWithManagerAndOptions(mgr, GitRepositoryReconcilerOptions{})
@@ -535,7 +548,72 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 	// Persist the ArtifactSet.
 	*includes = *artifacts
 
-	c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, true)
+	//Configure TLS transport for custom gitclient with SSL certificates
+	var sslCertificateData map[string][]byte
+	if obj.Spec.SecretRef != nil {
+		var err error
+		sslCertificateData, err = r.getSecretData(ctx, obj.Spec.SecretRef.Name, obj.Namespace)
+		if err != nil {
+			return sreconcile.ResultEmpty, fmt.Errorf("failed to get secret '%s/%s': %w", obj.GetNamespace(), obj.Spec.SecretRef.Name, err)
+		}
+	}
+
+	/*sslCertificateData := map[string][]byte{
+		"tls.crt": []byte(`-----BEGIN CERTIFICATE-----
+	MIIDXTCCAkWgAwIBAgIJAJC1HiEz5M5tMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+	BAYTAkFUMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
+	aWRnaXRzIFB0eSBMdGQwHhcNMTcxMDEzMDE0NjMzWhcNNDkxMjMxMDE0NjMzWjBF
+	MQswCQYDVQQGEwJBVDERMA8GA1UECAwIU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50
+	ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+	CgKCAQEAt0EGOyWrZ6ZM1Z7eHfi7k4EV1bttsy/yrOaQ2YI12e5S8ZatNk3qL4Go
+	R9sGv1K4YTBFFSE4J1rMwtZp6mfdZYS5hJqDh7J2i7THmVdE2Fe/Yv6IUXwT6Z0o
+	HfITV0REsdkMvyfD4BdkMXIZhoHuaRtQve5tv/f8XRhVk/yeQtDmRq3nXlHamByx
+	2SdU/rFIe0ypuWZgzEhS3lZa7slCMRiZB3D0LiqJG/UK0zeBfY7f2fNatlNUBXWT
+	3XbCwW3e3ymd5j2eoZtE/hJ6m6RQav8UF2xI8vate4yBYOLV4FaqSvaMtFngxiUi
+	gH3GXGZBJDdjWXuj2fJLRcGUr2R5fwIDAQABo1AwTjAdBgNVHQ4EFgQUtFrkPBvn
+	VHVEN2Oa0q4y3iQjkDgwHwYDVR0jBBgwFoAUtFrkPBvnVHVEN2Oa0q4y3iQjkDgw
+	DAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAZ4CfBZzQOP0qo3T6Pzdb
+	BkBOZ66cFZgqdE7+v3h8Dysp+DyUoD4xjDUvhqJ0ba4K+gtCxC6EFJ1/U4eu3ROM
+	hknVDqt7dnlyXD8Zpt21van+Y3UnplYtX80emwQOcHlonnM0K3tUCk+Z9PT/oBvb
+	jJ8TwXACjFyzdPONFbZIz+D5ZmoFafh+1qbVQGDSNI/15t/JPYl6byEPENv8B6fI
+	fdZ5EO8y/LTUQI6Do0m3HcF7I6C5/C4Ljl/FFeRiUdujo0AvTb3y5Tb2zbZi6jsl
+	RFcpJHNRzoFLFMSvb7h4r2532HdO8vx7lJw1dV64E6KrFvlNVspHEyB+c6E6rB3z
+	fg==
+	-----END CERTIFICATE-----`),
+		"tls.key": []byte(`-----BEGIN RSA PRIVATE KEY-----
+	MIIEowIBAAKCAQEAt0EGOyWrZ6ZM1Z7eHfi7k4EV1bttsy/yrOaQ2YI12e5S8Zat
+	Nk3qL4GoR9sGv1K4YTBFFSE4J1rMwtZp6mfdZYS5hJqDh7J2i7THmVdE2Fe/Yv6I
+	UXwT6Z0oHfITV0REsdkMvyfD4BdkMXIZhoHuaRtQve5tv/f8XRhVk/yeQtDmRq3n
+	XlHamByx2SdU/rFIe0ypuWZgzEhS3lZa7slCMRiZB3D0LiqJG/UK0zeBfY7f2fNa
+	tlNUBXWT3XbCwW3e3ymd5j2eoZtE/hJ6m6RQav8UF2xI8vate4yBYOLV4FaqSvaM
+	tFngxiUigH3GXGZBJDdjWXuj2fJLRcGUr2R5fwIDAQABAoIBAQCrZ6ZHZFIxOVhM
+	1s3G0KHz8D0QSiz2P/vFwveE3S6YY3lqtLr10/xBkEDua2DVlNxEtzl5bQX1A0Y5
+	Y5L+GTg2XNxZs7x0nUrSV1bPRzBtbowx97lM8DbFC1fISXB6/A4mr5eK6U3TGEqA
+	5Yt2Y1I0b8Iy/jYoCR/v5ie/QT4Z/tWyw4OZl0MEeWUWGadAiLWSW5PVX3qW3MVp
+	Hk3ajUxTANdKV7R+rjW5GGfTaVI8dI6C3aPDIvNN7C6aAi7Jv7TrlCQyD9kLfDAi
+	6Pi+fSUY5SCS15DIWE4rakZI2VC1JIN0Wx2IoP5X08TGej4ZxsH6qzC/2fas5GsC
+	8C+dfAiBAoGBAO0MeNyhP6mBdOYUuh7KPQQwJCPRMKqyJuE8MmukP4FZ6AheZ6Z4
+	E5Cq/5vuU8ntOQC8C6B7C7sSM1f2sB3ZM3oHiVgk/6NfZmgEYj/I0JJl8k3he8Zb
+	RDaOQ+7T3tVAzm+50pxZkOlA/qDkk2/QplwdsEdc2Kr+GGT3nvv6dW3RAoGBAMhR
+	Z6xK8xAvIGmu9I2xcADZS9ZvEYQ5wIwV/M8kLo6ysa5OEd4VILS4YEYim7Swoyvt
+	ThE88a3tTXXkxzt9WJ6kZ/xHfusBC4m3hWZh1FrSb36xw2uhmx8GnHRWV1EY6Y7t
+	Kud+CUYqRIXFL4kexYc2NVbHcSbI6tD27g345LCBAoGBAKkUV0UNq+RO4Nu+2t2O
+	2ieR7hPkIpn15zVGQPc3S1O3+H5BmE7jUj2bDZVxXepwUP/4yvggC95Lol1gDbFP
+	4rxA9+fq7Spp0wnQ2LniRMxViI+6MoAZxUPQ0aS6AsxT3Y70YimOf+5G3CO55Zmb
+	FgDmSYgH2QGwEc4SljHnA4FBAoGBAL6nD+2GWq6h2cARUT2Lm+myZ9R0UQg+SQ9/
+	dXO3+Bmy5RocaJ2ZkWgOxYxJksrdWvEYdD/3kSStQWluUvM3lmHmmt14Dlix5eEc
+	8iI6N8iCl6RgQ5ot+b6pY6Ed+gA7m9qZiN1xU7Olge7RRZKddaP5SNKeQAzI5FN/
+	v6ux7dLBAoGAX/mR/0t3WSC17iOnq64cy8E+PyrVsZEsCVg7UlyQwC7uaA6O2cJJ
+	r0kE5vwYP+3qAsBAFFH4HpPz6tI1xJE+H7ZphLKH2o9M6py3V0Cys7c/PWPN5iu9
+	URLsQoQ2jz+3sAYL8YonjOBr3g9SHIdjikMFqoWadNwkZ0gZmFOYKSU=
+	-----END RSA PRIVATE KEY-----`),
+	}*/
+
+	httpTrasportConfig := &GitClientHttpConfigurer{
+		SSLCertificateData: sslCertificateData,
+	}
+
+	c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, true, httpTrasportConfig)
 	if err != nil {
 		return sreconcile.ResultEmpty, err
 	}
@@ -579,7 +657,7 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 
 		// If we can't skip the reconciliation, checkout again without any
 		// optimization.
-		c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, false)
+		c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, false, httpTrasportConfig)
 		if err != nil {
 			return sreconcile.ResultEmpty, err
 		}
@@ -829,10 +907,31 @@ func (r *GitRepositoryReconciler) reconcileInclude(ctx context.Context, sp *patc
 	return sreconcile.ResultSuccess, nil
 }
 
+func (h *GitClientHttpConfigurer) ConfigureGitClient(ctx context.Context, obj *sourcev1.GitRepository) {
+	if obj.Spec.SecretRef != nil {
+		sslCertificate := &corev1.Secret{
+			Data: h.SSLCertificateData,
+		}
+		tlsConfig, _, err := tls.TLSClientConfigFromSecret(*sslCertificate, "")
+		if err != nil {
+			fmt.Println("Error generating TLS config:", err)
+			return
+		}
+		transportHttp, err := HttpTransportwithCustomCerts(tlsConfig, h.ProxyOpts, ctx)
+		if err != nil {
+			fmt.Println("Error setting up transport:", err)
+			return
+		}
+
+		gitclient.InstallProtocol("https", transportHttp)
+	}
+
+}
+
 // gitCheckout builds checkout options with the given configurations and
 // performs a git checkout.
 func (r *GitRepositoryReconciler) gitCheckout(ctx context.Context, obj *sourcev1.GitRepository,
-	authOpts *git.AuthOptions, proxyOpts *transport.ProxyOptions, dir string, optimized bool) (*git.Commit, error) {
+	authOpts *git.AuthOptions, proxyOpts *transport.ProxyOptions, dir string, optimized bool, clientConf GitClientConfigurer) (*git.Commit, error) {
 	// Configure checkout strategy.
 	cloneOpts := repository.CloneConfig{
 		RecurseSubmodules: obj.Spec.RecurseSubmodules,
@@ -866,6 +965,9 @@ func (r *GitRepositoryReconciler) gitCheckout(ctx context.Context, obj *sourcev1
 		clientOpts = append(clientOpts, gogit.WithProxy(*proxyOpts))
 	}
 
+	if clientConf != nil {
+		clientConf.ConfigureGitClient(ctx, obj)
+	}
 	gitReader, err := gogit.NewClient(dir, authOpts, clientOpts...)
 	if err != nil {
 		e := serror.NewGeneric(

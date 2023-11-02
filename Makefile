@@ -67,6 +67,10 @@ build: ## Build manager binary
 	go build $(GO_STATIC_FLAGS) -o $(BUILD_DIR)/bin/manager main.go
 
 KUBEBUILDER_ASSETS?="$(shell $(ENVTEST) --arch=$(ENVTEST_ARCH) use -i $(ENVTEST_KUBERNETES_VERSION) --bin-dir=$(ENVTEST_ASSETS_DIR) -p path)"
+echo-vars:
+	@echo "KUBEBUILDER_ASSETS=${KUBEBUILDER_ASSETS}"
+	@echo "GO_STATIC_FLAGS=${GO_STATIC_FLAGS}"
+	
 test: install-envtest test-api ## Run all tests
 	HTTPS_PROXY="" HTTP_PROXY="" \
 	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) \

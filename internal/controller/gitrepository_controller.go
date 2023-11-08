@@ -151,26 +151,27 @@ type gitRepositoryReconcileFunc func(ctx context.Context, sp *patch.SerialPatche
 type GitClientConfigurer interface {
 	ConfigureGitClient(ctx context.Context, obj *sourcev1.GitRepository)
 	IsValid() bool
+	backupHttpsTransport()
 }
 
 type GitClientHttpConfigurer struct {
-	SSLCertificateData map[string][]byte
-	ProxyOpts          *transport.ProxyOptions
-	Valid				bool
-	DefaultTransport   *transport.Transport
-	AppFirewallTransport *transport.Transport
+	SSLCertificateData   map[string][]byte
+	ProxyOpts            *transport.ProxyOptions
+	Valid                bool
+	DefaultTransport     transport.Transport
+	AppFirewallTransport transport.Transport
 }
 
 func (c *GitClientHttpConfigurer) IsValid() bool {
-    return c != nil
+	return c.Valid
 }
 
 func (c *GitClientHttpConfigurer) SetValid() {
-    c.Valid = true
+	c.Valid = true
 }
 
 func (c *GitClientHttpConfigurer) SetInvalid() {
-    c.Valid = false
+	c.Valid = false
 }
 
 func (r *GitRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -582,8 +583,12 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 		httpTrasportConfig = &GitClientHttpConfigurer{
 			SSLCertificateData: sslCertificateData,
 		}
-		httpTrasportConfig.SetValid()
-		//httpTrasportConfig.SetInvalid()
+		certBytes, keyBytes := sslCertificateData["certFile"], sslCertificateData["keyFile"]
+		if len(certBytes) > 0 && len(keyBytes) > 0 {
+			httpTrasportConfig.SetValid()
+		} else {
+			httpTrasportConfig.SetInvalid()
+		}
 	}
 
 	c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, true, httpTrasportConfig)
@@ -880,14 +885,15 @@ func (r *GitRepositoryReconciler) reconcileInclude(ctx context.Context, sp *patc
 	return sreconcile.ResultSuccess, nil
 }
 
-func (h *GitClientConfigurer) backupHttpsTransport(ctx context.Context, obj *sourcev1.GitRepository){
-
+func (h *GitClientHttpConfigurer) backupHttpsTransport() {
+	h.DefaultTransport = gitclient.Protocols["https"]
 }
 
 func (h *GitClientHttpConfigurer) ConfigureGitClient(ctx context.Context, obj *sourcev1.GitRepository) {
-	var secretName = obj.GetName()
 
-	if obj.Spec.SecretRef != nil && secretName == "app-firewall-auth" {
+	if obj.Spec.SecretRef != nil {
+		// var secretName = obj.Spec.SecretRef.Name
+		// if secretName == "waf-authentication" {
 		sslCertificate := &corev1.Secret{
 			Data: h.SSLCertificateData,
 		}
@@ -896,17 +902,18 @@ func (h *GitClientHttpConfigurer) ConfigureGitClient(ctx context.Context, obj *s
 			fmt.Println("Error generating TLS config:", err)
 			return
 		}
+		h.backupHttpsTransport()
+
 		transportHttp, err := HttpTransportwithCustomCerts(tlsConfig, h.ProxyOpts, ctx)
 		if err != nil {
 			fmt.Println("Error setting up transport:", err)
 			return
 		}
-		fmt.Println("Error setting up transport:", transportHttp)
-		
-		gitclient.InstallProtocol("app-firewall-auth", transportHttp)
-		
-	}
 
+		gitclient.InstallProtocol("https", transportHttp)
+
+	}
+	// }
 }
 
 // gitCheckout builds checkout options with the given configurations and

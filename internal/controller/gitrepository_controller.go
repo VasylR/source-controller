@@ -174,6 +174,12 @@ func (c *GitClientHttpConfigurer) SetInvalid() {
 	c.Valid = false
 }
 
+func (r *GitRepositoryReconciler) isCertificateDataValid(sslCertificateData map[string][]byte) bool {
+	certBytes, keyBytes := sslCertificateData["certFile"], sslCertificateData["keyFile"]
+	// Validate that both the certificate and key data are present
+	return len(certBytes) > 0 && len(keyBytes) > 0
+}
+
 func (r *GitRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return r.SetupWithManagerAndOptions(mgr, GitRepositoryReconcilerOptions{})
 }
@@ -565,33 +571,12 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 	// Persist the ArtifactSet.
 	*includes = *artifacts
 
-	//Configure TLS transport for custom gitclient with SSL certificates
-	var sslCertificateData map[string][]byte
-	if obj.Spec.SecretRef != nil {
-		var err error
-		sslCertificateData, err = r.getSecretData(ctx, obj.Spec.SecretRef.Name, obj.Namespace)
-		if err != nil {
-			return sreconcile.ResultEmpty, fmt.Errorf("failed to get secret '%s/%s': %w", obj.GetNamespace(), obj.Spec.SecretRef.Name, err)
-		}
+	httpTransportConfig, err := r.configureHttpTransport(ctx, obj)
+	if err != nil {
+		return sreconcile.ResultEmpty, err
 	}
 
-	var httpTrasportConfig *GitClientHttpConfigurer
-	if sslCertificateData == nil {
-		httpTrasportConfig = &GitClientHttpConfigurer{}
-		httpTrasportConfig.SetInvalid()
-	} else {
-		httpTrasportConfig = &GitClientHttpConfigurer{
-			SSLCertificateData: sslCertificateData,
-		}
-		certBytes, keyBytes := sslCertificateData["certFile"], sslCertificateData["keyFile"]
-		if len(certBytes) > 0 && len(keyBytes) > 0 {
-			httpTrasportConfig.SetValid()
-		} else {
-			httpTrasportConfig.SetInvalid()
-		}
-	}
-
-	c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, true, httpTrasportConfig)
+	c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, true, httpTransportConfig)
 	if err != nil {
 		return sreconcile.ResultEmpty, err
 	}
@@ -635,7 +620,7 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 
 		// If we can't skip the reconciliation, checkout again without any
 		// optimization.
-		c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, false, httpTrasportConfig)
+		c, err := r.gitCheckout(ctx, obj, authOpts, proxyOpts, dir, false, httpTransportConfig)
 		if err != nil {
 			return sreconcile.ResultEmpty, err
 		}
@@ -661,6 +646,33 @@ func (r *GitRepositoryReconciler) reconcileSource(ctx context.Context, sp *patch
 		}
 	}
 	return sreconcile.ResultSuccess, nil
+}
+
+// configureHttpTransport sets up the HTTP transport configuration for the Git client.
+func (r *GitRepositoryReconciler) configureHttpTransport(ctx context.Context, obj *sourcev1.GitRepository) (*GitClientHttpConfigurer, error) {
+	httpTransportConfig := &GitClientHttpConfigurer{} // Initialize with defaults configuration
+
+	// Check if SecretRef is specified for the repository
+	if obj.Spec.SecretRef != nil {
+		// Fetch the SSL certificate data from the specified secret
+		sslCertificateData, err := r.getSecretData(ctx, obj.Spec.SecretRef.Name, obj.Namespace)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get secret '%s/%s': %w", obj.Namespace, obj.Spec.SecretRef.Name, err)
+		}
+
+		// Set up the HTTP transport configuration with the fetched certificate data
+		httpTransportConfig.SSLCertificateData = sslCertificateData
+		if r.isCertificateDataValid(sslCertificateData) {
+			httpTransportConfig.SetValid()
+		} else {
+			httpTransportConfig.SetInvalid()
+		}
+	} else {
+		// If no SecretRef is provided, mark the transport config as invalid or set defaults
+		httpTransportConfig.SetInvalid()
+	}
+
+	return httpTransportConfig, nil
 }
 
 // getProxyOpts fetches the secret containing the proxy settings, constructs a
